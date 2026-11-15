@@ -74,6 +74,14 @@ class SmsReceiver : BroadcastReceiver() {
             receivedAt = timestamp,
             fingerprint = fingerprint
           )
+        } else {
+          // 3. Notify running React Native instance of the newly persisted SMS
+          Log.i(TAG, "Direct insert succeeded for $sender, invoking SmsBroadcastNotifier.notify")
+          SmsBroadcastNotifier.notify(
+            sender = sender,
+            receivedAt = timestamp,
+            fingerprint = fingerprint
+          )
         }
       }
     } catch (e: Exception) {

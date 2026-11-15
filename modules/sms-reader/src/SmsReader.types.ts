@@ -38,3 +38,15 @@ export interface ImportResult {
   /** Number of records skipped because they were already in SQLite. */
   duplicates: number;
 }
+
+/**
+ * Payload delivered when a new SMS is received natively.
+ */
+export interface SmsReceivedEvent {
+  /** Originating sender address or phone number. */
+  sender: string;
+  /** Received timestamp in Unix milliseconds. */
+  receivedAt: number;
+  /** Deterministic SHA-256 fingerprint for deduplication. */
+  fingerprint: string;
+}

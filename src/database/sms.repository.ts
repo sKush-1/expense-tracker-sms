@@ -34,18 +34,39 @@ export function insertSms(payload: InsertSmsPayload): InsertResult {
     ],
   );
 
-  // If this is a historical import with a real Android ID, upgrade any temporary recv_* ID
+  // If this is a historical import with a real Android ID:
   if (
     payload.fingerprint &&
     payload.android_sms_id &&
     !payload.android_sms_id.startsWith('recv_')
   ) {
+    // 1. Upgrade any temporary recv_* ID
     db.runSync(
       `UPDATE sms_messages
        SET android_sms_id = ?
        WHERE fingerprint = ? AND android_sms_id LIKE 'recv_%'`,
       [payload.android_sms_id, payload.fingerprint],
     );
+
+    // 2. If row already existed, update fingerprint & received_at if timestamp source changed
+    if (result.changes === 0) {
+      try {
+        db.runSync(
+          `UPDATE sms_messages
+           SET fingerprint = ?, received_at = ?
+           WHERE android_sms_id = ? AND (fingerprint != ? OR received_at != ?)`,
+          [
+            payload.fingerprint,
+            payload.received_at,
+            payload.android_sms_id,
+            payload.fingerprint,
+            payload.received_at,
+          ],
+        );
+      } catch {
+        // Safe fallback if fingerprint constraint prevents update
+      }
+    }
   }
 
   return {
@@ -59,6 +80,7 @@ export function insertSms(payload: InsertSmsPayload): InsertResult {
  *
  * Duplicate rows (matching `android_sms_id` or `fingerprint`) are silently ignored.
  * Temporary `recv_*` IDs are upgraded when canonical Android SMS IDs are provided.
+ * Existing records update their fingerprint and received_at to canonical values.
  *
  * @returns Total number of rows actually inserted (duplicates excluded).
  */
@@ -75,10 +97,16 @@ export function insertSmsBatch(payloads: InsertSmsPayload[]): number {
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
 
-    const upgradeStmt = db.prepareSync(
+    const upgradeRecvStmt = db.prepareSync(
       `UPDATE sms_messages
        SET android_sms_id = ?
        WHERE fingerprint = ? AND android_sms_id LIKE 'recv_%'`,
+    );
+
+    const updateCanonicalStmt = db.prepareSync(
+      `UPDATE sms_messages
+       SET fingerprint = ?, received_at = ?
+       WHERE android_sms_id = ? AND (fingerprint != ? OR received_at != ?)`,
     );
 
     try {
@@ -98,12 +126,29 @@ export function insertSmsBatch(payloads: InsertSmsPayload[]): number {
           payload.android_sms_id &&
           !payload.android_sms_id.startsWith('recv_')
         ) {
-          upgradeStmt.executeSync([payload.android_sms_id, payload.fingerprint]);
+          // Upgrade temporary recv_* ID
+          upgradeRecvStmt.executeSync([payload.android_sms_id, payload.fingerprint]);
+
+          // Normalize existing row if timestamp source changed
+          if (result.changes === 0) {
+            try {
+              updateCanonicalStmt.executeSync([
+                payload.fingerprint,
+                payload.received_at,
+                payload.android_sms_id,
+                payload.fingerprint,
+                payload.received_at,
+              ]);
+            } catch {
+              // Safe fallback
+            }
+          }
         }
       }
     } finally {
       insertStmt.finalizeSync();
-      upgradeStmt.finalizeSync();
+      upgradeRecvStmt.finalizeSync();
+      updateCanonicalStmt.finalizeSync();
     }
   });
 

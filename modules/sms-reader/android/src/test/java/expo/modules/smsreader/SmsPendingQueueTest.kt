@@ -84,15 +84,36 @@ class SmsPendingQueueTest {
   }
 
   @Test
-  fun testDuplicateEnqueueDoesNotCreateDuplicatePendingEntries() {
-    val fp = SmsFingerprint.compute("SENDER-X", "Duplicate Broadcast", 1700000000000L)
+  fun testRepeatedBroadcastsDoNotMultiplyQueueEntries() {
+    val fp = SmsFingerprint.compute("SENDER-X", "Duplicate Broadcast Alert", 1700000000000L)
 
-    // Broadcast receiver receives duplicate intent
-    SmsPendingQueue.enqueue(tempDir, "SENDER-X", "Duplicate Broadcast", 1700000000000L, fp)
-    SmsPendingQueue.enqueue(tempDir, "SENDER-X", "Duplicate Broadcast", 1700000000000L, fp)
+    // Broadcast receiver receives 5 identical intents
+    for (i in 1..5) {
+      SmsPendingQueue.enqueue(tempDir, "SENDER-X", "Duplicate Broadcast Alert", 1700000000000L, fp)
+    }
 
     val list = SmsPendingQueue.getPendingMessages(tempDir)
-    assertEquals(1, list.size)
+    assertEquals("Repeated broadcasts must result in exactly 1 queue entry", 1, list.size)
+    assertEquals(fp, list[0].fingerprint)
+  }
+
+  @Test
+  fun testAcknowledgementFailureLeavesQueueIntact() {
+    val fp1 = SmsFingerprint.compute("SENDER-1", "Test Msg 1", 1700000000000L)
+    val fp2 = SmsFingerprint.compute("SENDER-2", "Test Msg 2", 1700000001000L)
+
+    SmsPendingQueue.enqueue(tempDir, "SENDER-1", "Test Msg 1", 1700000000000L, fp1)
+    SmsPendingQueue.enqueue(tempDir, "SENDER-2", "Test Msg 2", 1700000001000L, fp2)
+
+    // Attempt acknowledging with non-matching fingerprints (e.g. corrupted ack or failure)
+    val removed = SmsPendingQueue.acknowledge(tempDir, listOf("invalid_fp_1", "invalid_fp_2"))
+    assertEquals(0, removed)
+
+    // Queue must retain both original messages completely intact
+    val remaining = SmsPendingQueue.getPendingMessages(tempDir)
+    assertEquals(2, remaining.size)
+    assertEquals(fp1, remaining[0].fingerprint)
+    assertEquals(fp2, remaining[1].fingerprint)
   }
 
   @Test

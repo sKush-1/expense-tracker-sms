@@ -1,18 +1,22 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   FlatList,
   Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
+  type AppStateStatus,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { reloadDatabase } from '@/database/db';
 import { getAllSms, getSmsCount } from '@/database/sms.repository';
 import { importExistingSms } from '@/sms/sms-importer';
 import {
+  addSmsReceivedListener,
   checkSmsPermissions,
   requestSmsPermissions,
   syncPendingMessages,
@@ -44,22 +48,65 @@ export default function HomeScreen() {
   const [importing, setImporting] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
-  // Ref-based refresh counter: incrementing it triggers the data-load effect.
-  const [refreshTick, setRefreshTick] = useState(0);
+  const appStateRef = useRef<AppStateStatus>((AppState.currentState as AppStateStatus) ?? 'active');
+  const importingRef = useRef(importing);
+  useEffect(() => {
+    importingRef.current = importing;
+  }, [importing]);
 
-  // Load data & sync pending queue on startup or explicit refresh.
+  /**
+   * Loads SQLite data, drains pending queue, and checks permissions.
+   *
+   * @param isSilent When true, avoids showing full screen loading spinner (used for live events).
+   */
+  const loadData = useCallback(async (isSilent = false) => {
+    if (!isSilent) {
+      setLoading(true);
+    }
+
+    try {
+      // 1. Drain and synchronize any pending native messages
+      const synced = await syncPendingMessages();
+      if (synced > 0) {
+        setStatusBanner(`📥 Synchronized ${synced} incoming message(s).`);
+      }
+
+      // 2. Re-open SQLite connection so external receiver writes in WAL mode are immediately fresh
+      reloadDatabase();
+
+      // 3. Fetch current counts and latest messages from SQLite
+      const count = getSmsCount();
+      const latest = getAllSms(20);
+
+      setDbStatus({ initialized: true, smsCount: count, error: null });
+      setMessages(latest);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDbStatus((prev) => ({ ...prev, error: message }));
+    } finally {
+      setLoading(false);
+    }
+
+    // 3. Check runtime permissions
+    try {
+      const perms = await checkSmsPermissions();
+      setPermissions(perms);
+    } catch {
+      setPermissions({ read: false, receive: false });
+    }
+  }, []);
+
+  // Initial load on mount
   useEffect(() => {
     let isMounted = true;
 
-    async function loadData() {
+    async function initialLoad() {
       try {
-        // 1. Drain and synchronize any pending native messages
         const synced = await syncPendingMessages();
         if (synced > 0 && isMounted) {
           setStatusBanner(`📥 Synchronized ${synced} incoming message(s).`);
         }
 
-        // 2. Fetch current counts and latest messages from SQLite
         const count = getSmsCount();
         const latest = getAllSms(20);
 
@@ -78,7 +125,6 @@ export default function HomeScreen() {
         }
       }
 
-      // 3. Check runtime permissions
       try {
         const perms = await checkSmsPermissions();
         if (isMounted) {
@@ -91,18 +137,47 @@ export default function HomeScreen() {
       }
     }
 
-    loadData();
+    initialLoad();
 
     return () => {
       isMounted = false;
     };
-  }, [refreshTick]);
+  }, []);
+
+  // AppState change listener: reload when returning from background/inactive to active
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        loadData(true);
+      }
+      appStateRef.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      subscription.remove();
+    };
+  }, [loadData]);
+
+  // Live native-to-JS SMS event listener
+  useEffect(() => {
+    const subscription = addSmsReceivedListener((event) => {
+      setStatusBanner(`📥 New SMS received from ${event.sender}`);
+      loadData(true);
+    });
+
+    return () => {
+      subscription?.remove();
+    };
+  }, [loadData]);
 
   const refresh = useCallback(() => {
-    setLoading(true);
     setStatusBanner(null);
-    setRefreshTick((t) => t + 1);
-  }, []);
+    loadData(false);
+  }, [loadData]);
 
   const handleImportExistingSms = useCallback(async () => {
     if (Platform.OS !== 'android') {

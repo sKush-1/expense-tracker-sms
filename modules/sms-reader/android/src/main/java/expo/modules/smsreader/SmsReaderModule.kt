@@ -2,6 +2,7 @@ package expo.modules.smsreader
 
 import android.content.pm.PackageManager
 import android.provider.Telephony
+import android.util.Log
 import androidx.core.content.ContextCompat
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
@@ -15,12 +16,56 @@ import expo.modules.kotlin.modules.ModuleDefinition
  *   - Checking READ_SMS and RECEIVE_SMS permissions
  *   - Crash-safe read/acknowledge pending queue for SmsReceiver
  *   - Computing deterministic SHA-256 SMS fingerprints
+ *   - Emitting live onSmsReceived events when incoming SMS arrives
  */
-class SmsReaderModule : Module() {
+class SmsReaderModule : Module(), SmsReceivedListener {
+
+  companion object {
+    private const val TAG = "SmsReaderModule"
+  }
+
+  override fun onSmsReceived(sender: String, receivedAt: Long, fingerprint: String) {
+    try {
+      Log.i(TAG, "onSmsReceived invoked for $sender (timestamp: $receivedAt). Dispatching sendEvent.")
+      sendEvent(
+        "onSmsReceived",
+        mapOf(
+          "sender" to sender,
+          "receivedAt" to receivedAt,
+          "fingerprint" to fingerprint
+        )
+      )
+      Log.i(TAG, "sendEvent onSmsReceived finished successfully.")
+    } catch (e: Throwable) {
+      Log.w(TAG, "Error dispatching onSmsReceived event to JS: ${e.message}")
+    }
+  }
 
   override fun definition() = ModuleDefinition {
 
     Name("SmsReader")
+
+    // Live incoming SMS event
+    Events("onSmsReceived")
+
+    OnCreate {
+      Log.i(TAG, "OnCreate called for SmsReaderModule, registering listener")
+      SmsBroadcastNotifier.registerListener(this@SmsReaderModule)
+    }
+
+    OnStartObserving("onSmsReceived") {
+      Log.i(TAG, "OnStartObserving(onSmsReceived) called, ensuring listener is registered")
+      SmsBroadcastNotifier.registerListener(this@SmsReaderModule)
+    }
+
+    OnStopObserving("onSmsReceived") {
+      Log.i(TAG, "OnStopObserving(onSmsReceived) called")
+    }
+
+    OnDestroy {
+      Log.i(TAG, "OnDestroy called for SmsReaderModule, unregistering listener")
+      SmsBroadcastNotifier.unregisterListener(this@SmsReaderModule)
+    }
 
     // -----------------------------------------------------------------------
     // hasReadSmsPermission

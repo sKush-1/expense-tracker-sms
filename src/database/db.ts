@@ -97,7 +97,20 @@ export async function initDatabase(): Promise<void> {
  */
 export function closeDatabase(): void {
   if (_db !== null) {
-    _db.closeSync();
+    try {
+      _db.closeSync();
+    } catch {
+      // Safe fallback
+    }
     _db = null;
   }
+}
+
+/**
+ * Re-opens the database connection to guarantee all external writes
+ * (e.g. from native BroadcastReceiver) are immediately visible.
+ */
+export function reloadDatabase(): SQLite.SQLiteDatabase {
+  closeDatabase();
+  return getDatabase();
 }

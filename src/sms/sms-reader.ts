@@ -1,9 +1,12 @@
+import type { EventSubscription } from 'expo';
 import { PermissionsAndroid, Platform } from 'react-native';
 
 import { insertSms } from '@/database/sms.repository';
 
 import { SmsReaderModule } from '../../modules/sms-reader';
-import type { NativeSmsRecord } from '../../modules/sms-reader';
+import type { NativeSmsRecord, SmsReceivedEvent } from '../../modules/sms-reader';
+
+export type { SmsReceivedEvent };
 
 export interface SmsPermissionsStatus {
   read: boolean;
@@ -215,4 +218,23 @@ export async function getInboxCount(): Promise<number> {
   }
 
   return await SmsReaderModule.getTotalInboxCount();
+}
+
+/**
+ * Subscribes to live incoming SMS events emitted by the native SmsReader module.
+ *
+ * @param listener Callback invoked when an SMS is received while the app is active.
+ * @returns EventSubscription with a .remove() method, or null if unsupported.
+ */
+export function addSmsReceivedListener(
+  listener: (event: SmsReceivedEvent) => void,
+): EventSubscription | null {
+  if (Platform.OS !== 'android') {
+    return null;
+  }
+  if (!SmsReaderModule?.addListener) {
+    console.warn('[sms-reader] SmsReaderModule has no addListener method!');
+    return null;
+  }
+  return SmsReaderModule.addListener('onSmsReceived', listener);
 }

@@ -1,13 +1,24 @@
 import { NativeModule, requireOptionalNativeModule } from 'expo';
 
-import type { NativeSmsRecord, PendingSmsRecord } from './SmsReader.types';
+import type {
+  NativeSmsRecord,
+  PendingSmsRecord,
+  SmsReceivedEvent,
+} from './SmsReader.types';
+
+/**
+ * Events emitted by the SmsReader native module.
+ */
+export type SmsReaderEvents = {
+  onSmsReceived: (event: SmsReceivedEvent) => void;
+};
 
 /**
  * Type-safe interface for the native SmsReaderModule.
  *
  * All AsyncFunctions return Promises on the JS side.
  */
-export declare class SmsReaderNativeModule extends NativeModule {
+export declare class SmsReaderNativeModule extends NativeModule<SmsReaderEvents> {
   /**
    * Synchronously checks whether READ_SMS permission is currently granted.
    * Does not trigger a permission dialog.
