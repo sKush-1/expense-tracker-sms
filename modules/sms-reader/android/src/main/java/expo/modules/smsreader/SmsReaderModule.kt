@@ -10,15 +10,11 @@ import expo.modules.kotlin.modules.ModuleDefinition
 /**
  * SmsReaderModule
  *
- * Expo native module that reads historical SMS messages from the Android inbox
- * using ContentResolver + Telephony.Sms.Inbox.CONTENT_URI.
- *
- * Exposed JS functions:
- *   - hasReadSmsPermission(): Boolean
- *   - readInboxPage(offset: Int, pageSize: Int): List<Map<String, Any?>>
- *
- * Permission management (runtime PermissionsAndroid.request) is handled on the
- * TypeScript side so the UI can show appropriate rationale dialogs.
+ * Expo native module that provides:
+ *   - Reading historical SMS messages from Android Content Provider
+ *   - Checking READ_SMS and RECEIVE_SMS permissions
+ *   - Draining durable pending queue messages captured by SmsReceiver
+ *   - Computing deterministic SHA-256 SMS fingerprints
  */
 class SmsReaderModule : Module() {
 
@@ -41,21 +37,61 @@ class SmsReaderModule : Module() {
     }
 
     // -----------------------------------------------------------------------
+    // hasReceiveSmsPermission
+    // Synchronously checks whether RECEIVE_SMS has been granted.
+    // -----------------------------------------------------------------------
+    Function("hasReceiveSmsPermission") {
+      val context = appContext.reactContext
+        ?: throw Exceptions.AppContextLost()
+
+      ContextCompat.checkSelfPermission(
+        context,
+        android.Manifest.permission.RECEIVE_SMS,
+      ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    // -----------------------------------------------------------------------
+    // computeFingerprint(sender, message, receivedAt)
+    // Synchronously computes the SHA-256 deduplication fingerprint.
+    // -----------------------------------------------------------------------
+    Function("computeFingerprint") { sender: String, message: String, receivedAt: Long ->
+      SmsFingerprint.compute(sender, message, receivedAt)
+    }
+
+    // -----------------------------------------------------------------------
+    // drainPendingMessages()
+    // Returns any messages that were queued by the SmsReceiver (when SQLite
+    // was temporarily locked) and removes them from the pending queue.
+    // -----------------------------------------------------------------------
+    AsyncFunction("drainPendingMessages") {
+      val context = appContext.reactContext
+        ?: throw Exceptions.AppContextLost()
+
+      val pending = SmsPendingQueue.drain(context)
+      pending.map { msg ->
+        mapOf(
+          "sender" to msg.sender,
+          "message" to msg.message,
+          "received_at" to msg.receivedAt,
+          "fingerprint" to msg.fingerprint
+        )
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // getPendingMessagesCount()
+    // Returns the count of pending messages in the queue.
+    // -----------------------------------------------------------------------
+    Function("getPendingMessagesCount") {
+      val context = appContext.reactContext
+        ?: throw Exceptions.AppContextLost()
+
+      SmsPendingQueue.getPendingCount(context)
+    }
+
+    // -----------------------------------------------------------------------
     // readInboxPage(offset, pageSize)
     // Reads a single page of inbox messages from the SMS Content Provider.
-    //
-    // Returns a list of maps, each with:
-    //   id        – Android's internal SMS _ID (String)
-    //   address   – sender phone number / address (String)
-    //   body      – message body (String)
-    //   date      – received timestamp in Unix milliseconds (Long)
-    //   type      – message type constant (Int, always 1 = inbox)
-    //
-    // Ordering: newest messages first (DATE DESC).
-    //
-    // Throws:
-    //   - SmsPermissionDeniedException if READ_SMS is not granted.
-    //   - SmsQueryException on ContentResolver failure.
     // -----------------------------------------------------------------------
     AsyncFunction("readInboxPage") { offset: Int, pageSize: Int ->
       val context = appContext.reactContext
@@ -81,8 +117,6 @@ class SmsReaderModule : Module() {
       )
 
       // Sort by DATE descending so the newest messages come first.
-      // Pagination is done via LIMIT/OFFSET appended to the sort order —
-      // this is supported by the standard Android SMS Content Provider.
       val sortOrder = "${Telephony.Sms.DATE} DESC LIMIT $pageSize OFFSET $offset"
 
       try {
@@ -100,19 +134,24 @@ class SmsReaderModule : Module() {
           val typeIdx    = cursor.getColumnIndex(Telephony.Sms.TYPE)
 
           while (cursor.moveToNext()) {
+            val address = if (addressIdx >= 0) cursor.getString(addressIdx) ?: "" else ""
+            val body = if (bodyIdx >= 0) cursor.getString(bodyIdx) ?: "" else ""
+            val date = if (dateIdx >= 0) cursor.getLong(dateIdx) else 0L
+            val fingerprint = SmsFingerprint.compute(address, body, date)
+
             results.add(
               mapOf(
-                "id"      to if (idIdx >= 0) cursor.getString(idIdx) else null,
-                "address" to if (addressIdx >= 0) cursor.getString(addressIdx) else "",
-                "body"    to if (bodyIdx >= 0) cursor.getString(bodyIdx) else "",
-                "date"    to if (dateIdx >= 0) cursor.getLong(dateIdx) else 0L,
-                "type"    to if (typeIdx >= 0) cursor.getInt(typeIdx) else 1,
+                "id"          to if (idIdx >= 0) cursor.getString(idIdx) else null,
+                "address"     to address,
+                "body"        to body,
+                "date"        to date,
+                "type"        to if (typeIdx >= 0) cursor.getInt(typeIdx) else 1,
+                "fingerprint" to fingerprint,
               ),
             )
           }
         }
       } catch (e: SecurityException) {
-        // Should not happen after our guard, but handle defensively.
         throw SmsPermissionDeniedException()
       } catch (e: Exception) {
         throw SmsQueryException(e.message ?: "Unknown query error")

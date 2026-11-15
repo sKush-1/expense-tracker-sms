@@ -9,8 +9,11 @@ import { getDatabase } from './db';
 /**
  * Inserts a single SMS message.
  *
- * Uses INSERT OR IGNORE so that a duplicate `android_sms_id` is silently
- * discarded rather than causing an error.
+ * Uses INSERT OR IGNORE so that a duplicate `android_sms_id` or `fingerprint`
+ * is silently discarded rather than causing an error.
+ *
+ * Also upgrades any temporary `recv_*` ID to the canonical Android SMS ID
+ * if this message was previously captured by the BroadcastReceiver.
  *
  * @returns `InsertResult` with `changes === 0` when the row was ignored.
  */
@@ -19,16 +22,31 @@ export function insertSms(payload: InsertSmsPayload): InsertResult {
 
   const result = db.runSync(
     `INSERT OR IGNORE INTO sms_messages
-       (android_sms_id, sender, message, received_at, message_type)
-     VALUES (?, ?, ?, ?, ?)`,
+       (android_sms_id, sender, message, received_at, message_type, fingerprint)
+     VALUES (?, ?, ?, ?, ?, ?)`,
     [
       payload.android_sms_id,
       payload.sender,
       payload.message,
       payload.received_at,
       payload.message_type,
+      payload.fingerprint ?? null,
     ],
   );
+
+  // If this is a historical import with a real Android ID, upgrade any temporary recv_* ID
+  if (
+    payload.fingerprint &&
+    payload.android_sms_id &&
+    !payload.android_sms_id.startsWith('recv_')
+  ) {
+    db.runSync(
+      `UPDATE sms_messages
+       SET android_sms_id = ?
+       WHERE fingerprint = ? AND android_sms_id LIKE 'recv_%'`,
+      [payload.android_sms_id, payload.fingerprint],
+    );
+  }
 
   return {
     lastInsertRowId: result.lastInsertRowId,
@@ -39,7 +57,8 @@ export function insertSms(payload: InsertSmsPayload): InsertResult {
 /**
  * Inserts a batch of SMS messages inside a single transaction.
  *
- * Duplicate rows (same `android_sms_id`) are silently ignored.
+ * Duplicate rows (matching `android_sms_id` or `fingerprint`) are silently ignored.
+ * Temporary `recv_*` IDs are upgraded when canonical Android SMS IDs are provided.
  *
  * @returns Total number of rows actually inserted (duplicates excluded).
  */
@@ -50,25 +69,41 @@ export function insertSmsBatch(payloads: InsertSmsPayload[]): number {
   let insertedCount = 0;
 
   db.withTransactionSync(() => {
-    const stmt = db.prepareSync(
+    const insertStmt = db.prepareSync(
       `INSERT OR IGNORE INTO sms_messages
-         (android_sms_id, sender, message, received_at, message_type)
-       VALUES (?, ?, ?, ?, ?)`,
+         (android_sms_id, sender, message, received_at, message_type, fingerprint)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+
+    const upgradeStmt = db.prepareSync(
+      `UPDATE sms_messages
+       SET android_sms_id = ?
+       WHERE fingerprint = ? AND android_sms_id LIKE 'recv_%'`,
     );
 
     try {
       for (const payload of payloads) {
-        const result = stmt.executeSync([
+        const result = insertStmt.executeSync([
           payload.android_sms_id,
           payload.sender,
           payload.message,
           payload.received_at,
           payload.message_type,
+          payload.fingerprint ?? null,
         ]);
         insertedCount += result.changes;
+
+        if (
+          payload.fingerprint &&
+          payload.android_sms_id &&
+          !payload.android_sms_id.startsWith('recv_')
+        ) {
+          upgradeStmt.executeSync([payload.android_sms_id, payload.fingerprint]);
+        }
       }
     } finally {
-      stmt.finalizeSync();
+      insertStmt.finalizeSync();
+      upgradeStmt.finalizeSync();
     }
   });
 

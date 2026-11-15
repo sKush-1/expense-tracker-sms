@@ -12,7 +12,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { getAllSms, getSmsCount } from '@/database/sms.repository';
 import { importExistingSms } from '@/sms/sms-importer';
-import { checkSmsPermission, requestSmsPermission } from '@/sms/sms-reader';
+import {
+  checkSmsPermissions,
+  requestSmsPermissions,
+  syncPendingMessages,
+  type SmsPermissionsStatus,
+} from '@/sms/sms-reader';
 import type { DbStatus, SmsMessage } from '@/types/sms';
 
 // ---------------------------------------------------------------------------
@@ -33,7 +38,7 @@ export default function HomeScreen() {
     smsCount: 0,
     error: null,
   });
-  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
+  const [permissions, setPermissions] = useState<SmsPermissionsStatus | null>(null);
   const [messages, setMessages] = useState<SmsMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
@@ -42,25 +47,55 @@ export default function HomeScreen() {
   // Ref-based refresh counter: incrementing it triggers the data-load effect.
   const [refreshTick, setRefreshTick] = useState(0);
 
-  // Load data whenever refreshTick changes (mount + explicit refresh).
+  // Load data & sync pending queue on startup or explicit refresh.
   useEffect(() => {
-    try {
-      const count = getSmsCount();
-      const latest = getAllSms(20);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setDbStatus({ initialized: true, smsCount: count, error: null });
-      setMessages(latest);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setDbStatus((prev) => ({ ...prev, error: message }));
-    } finally {
-      setLoading(false);
+    let isMounted = true;
+
+    async function loadData() {
+      try {
+        // 1. Drain and synchronize any pending native messages
+        const synced = await syncPendingMessages();
+        if (synced > 0 && isMounted) {
+          setStatusBanner(`📥 Synchronized ${synced} incoming message(s).`);
+        }
+
+        // 2. Fetch current counts and latest messages from SQLite
+        const count = getSmsCount();
+        const latest = getAllSms(20);
+
+        if (isMounted) {
+          setDbStatus({ initialized: true, smsCount: count, error: null });
+          setMessages(latest);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (isMounted) {
+          setDbStatus((prev) => ({ ...prev, error: message }));
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+
+      // 3. Check runtime permissions
+      try {
+        const perms = await checkSmsPermissions();
+        if (isMounted) {
+          setPermissions(perms);
+        }
+      } catch {
+        if (isMounted) {
+          setPermissions({ read: false, receive: false });
+        }
+      }
     }
 
-    // Check permission status
-    checkSmsPermission()
-      .then((granted) => setPermissionGranted(granted))
-      .catch(() => setPermissionGranted(false));
+    loadData();
+
+    return () => {
+      isMounted = false;
+    };
   }, [refreshTick]);
 
   const refresh = useCallback(() => {
@@ -76,7 +111,7 @@ export default function HomeScreen() {
     }
 
     setImporting(true);
-    setStatusBanner('⏳ Requesting SMS permission and reading inbox...');
+    setStatusBanner('⏳ Reading Android inbox...');
 
     try {
       const result = await importExistingSms({
@@ -88,7 +123,7 @@ export default function HomeScreen() {
         },
       });
 
-      setPermissionGranted(true);
+      setPermissions((prev) => (prev ? { ...prev, read: true } : { read: true, receive: false }));
       setStatusBanner(
         `✅ Import complete: ${result.totalRead} read, ${result.inserted} newly imported, ${result.duplicates} duplicates skipped.`,
       );
@@ -96,8 +131,8 @@ export default function HomeScreen() {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       if (errorMsg.includes('denied')) {
-        setPermissionGranted(false);
-        setStatusBanner('❌ READ_SMS permission was denied. Please grant permission in settings.');
+        setPermissions((prev) => (prev ? { ...prev, read: false } : { read: false, receive: false }));
+        setStatusBanner('❌ READ_SMS permission was denied. Please grant permission to import messages.');
       } else {
         setStatusBanner(`❌ Import failed: ${errorMsg}`);
       }
@@ -106,14 +141,18 @@ export default function HomeScreen() {
     }
   }, [refresh]);
 
-  const handleRequestPermission = useCallback(async () => {
-    const granted = await requestSmsPermission();
-    setPermissionGranted(granted);
-    setStatusBanner(
-      granted
-        ? '✅ READ_SMS permission granted.'
-        : '❌ READ_SMS permission denied.',
-    );
+  const handleRequestPermissions = useCallback(async () => {
+    const perms = await requestSmsPermissions();
+    setPermissions(perms);
+    if (perms.read && perms.receive) {
+      setStatusBanner('✅ Both SMS permissions granted. Automatic capture is active.');
+    } else if (perms.receive && !perms.read) {
+      setStatusBanner('⚠️ RECEIVE_SMS granted (auto-capture active), but READ_SMS was denied.');
+    } else if (perms.read && !perms.receive) {
+      setStatusBanner('⚠️ READ_SMS granted (import active), but RECEIVE_SMS was denied.');
+    } else {
+      setStatusBanner('❌ Permissions denied. SMS capture and historical import are unavailable.');
+    }
   }, []);
 
   // ---- Render ----
@@ -126,6 +165,8 @@ export default function HomeScreen() {
       </SafeAreaView>
     );
   }
+
+  const allPermissionsGranted = permissions?.read === true && permissions?.receive === true;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -146,15 +187,30 @@ export default function HomeScreen() {
         </View>
 
         <View style={styles.statusRow}>
-          <Text style={styles.statusLabel}>READ_SMS Permission:</Text>
+          <Text style={styles.statusLabel}>Auto-Capture (RECEIVE_SMS):</Text>
           <Text
             style={[
               styles.statusValue,
-              permissionGranted ? styles.ok : permissionGranted === false ? styles.error : styles.pending,
+              permissions?.receive ? styles.ok : permissions?.receive === false ? styles.error : styles.pending,
             ]}>
-            {permissionGranted === null
+            {permissions === null
               ? 'Checking…'
-              : permissionGranted
+              : permissions.receive
+                ? '✅ Active'
+                : '⚠️ Missing Permission'}
+          </Text>
+        </View>
+
+        <View style={styles.statusRow}>
+          <Text style={styles.statusLabel}>Historical Import (READ_SMS):</Text>
+          <Text
+            style={[
+              styles.statusValue,
+              permissions?.read ? styles.ok : permissions?.read === false ? styles.error : styles.pending,
+            ]}>
+            {permissions === null
+              ? 'Checking…'
+              : permissions.read
                 ? '✅ Granted'
                 : '⚠️ Not Granted'}
           </Text>
@@ -182,11 +238,11 @@ export default function HomeScreen() {
         </Pressable>
 
         <View style={styles.buttonRow}>
-          {permissionGranted === false && (
+          {!allPermissionsGranted && (
             <Pressable
               style={[styles.button, styles.permButton]}
-              onPress={handleRequestPermission}>
-              <Text style={styles.buttonText}>Grant Permission</Text>
+              onPress={handleRequestPermissions}>
+              <Text style={styles.buttonText}>Grant Permissions</Text>
             </Pressable>
           )}
           <Pressable style={[styles.button, styles.secondaryButton]} onPress={refresh}>
@@ -212,7 +268,7 @@ export default function HomeScreen() {
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>No messages stored yet.</Text>
           <Text style={styles.emptySubtext}>
-            Tap &quot;Import Existing SMS&quot; to read messages from your Android inbox.
+            Tap &quot;Import Existing SMS&quot; or receive a new SMS on this device.
           </Text>
         </View>
       ) : (
@@ -233,6 +289,7 @@ export default function HomeScreen() {
               </Text>
               <Text style={styles.metaText}>
                 Type: {item.message_type} · ID: {item.android_sms_id ?? 'n/a'}
+                {item.fingerprint ? ` · FP: ${item.fingerprint.slice(0, 8)}…` : ''}
               </Text>
             </View>
           )}

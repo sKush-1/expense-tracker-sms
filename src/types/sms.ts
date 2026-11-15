@@ -9,6 +9,7 @@ export interface SmsMessage {
   received_at: number; // Unix milliseconds
   message_type: string;
   created_at: number | null; // Unix seconds (SQLite default via strftime)
+  fingerprint?: string | null;
 }
 
 /**

@@ -2,7 +2,12 @@ import { insertSmsBatch } from '@/database/sms.repository';
 import type { InsertSmsPayload } from '@/types/sms';
 import type { ImportResult } from '../../modules/sms-reader';
 
-import { checkSmsPermission, readInboxPage, requestSmsPermission } from './sms-reader';
+import {
+  checkSmsPermissions,
+  readInboxPage,
+  requestSmsPermissions,
+  syncPendingMessages,
+} from './sms-reader';
 
 export interface ImportOptions {
   /** Number of messages to query and insert in each batch. Defaults to 100. */
@@ -18,18 +23,21 @@ export interface ImportOptions {
  * thousands of messages in the inbox.
  *
  * Each batch is inserted using `insertSmsBatch()` inside a transaction, which
- * uses `INSERT OR IGNORE` on the unique `android_sms_id`.
+ * uses `INSERT OR IGNORE` on both `android_sms_id` and `fingerprint`.
  *
  * Returns detailed stats on total read, new inserts, and duplicates skipped.
  */
 export async function importExistingSms(options: ImportOptions = {}): Promise<ImportResult> {
   const batchSize = options.batchSize ?? 100;
 
-  // 1. Check or request permission
-  let hasPermission = await checkSmsPermission();
-  if (!hasPermission) {
-    hasPermission = await requestSmsPermission();
-    if (!hasPermission) {
+  // 1. Drain any pending messages first
+  await syncPendingMessages();
+
+  // 2. Check or request permission
+  let permissions = await checkSmsPermissions();
+  if (!permissions.read) {
+    permissions = await requestSmsPermissions();
+    if (!permissions.read) {
       throw new Error('READ_SMS permission was denied. Cannot import messages.');
     }
   }
@@ -39,7 +47,7 @@ export async function importExistingSms(options: ImportOptions = {}): Promise<Im
   let totalInserted = 0;
   let hasMore = true;
 
-  // 2. Fetch and persist in batches
+  // 3. Fetch and persist in batches
   while (hasMore) {
     const rawBatch = await readInboxPage(offset, batchSize);
 
@@ -56,9 +64,10 @@ export async function importExistingSms(options: ImportOptions = {}): Promise<Im
       message: item.body || '',
       received_at: item.date || Date.now(),
       message_type: 'inbox',
+      fingerprint: item.fingerprint,
     }));
 
-    // Batch insert into SQLite (INSERT OR IGNORE)
+    // Batch insert into SQLite (INSERT OR IGNORE + upgrade recv_* IDs)
     const insertedInBatch = insertSmsBatch(payloads);
     totalInserted += insertedInBatch;
 

@@ -13,6 +13,18 @@ export interface NativeSmsRecord {
   date: number;
   /** Android SMS type constant (1 = inbox). */
   type: number;
+  /** Deterministic SHA-256 fingerprint for deduplication. */
+  fingerprint?: string;
+}
+
+/**
+ * Message record drained from the durable native pending queue.
+ */
+export interface PendingSmsRecord {
+  sender: string;
+  message: string;
+  received_at: number;
+  fingerprint: string;
 }
 
 /**
