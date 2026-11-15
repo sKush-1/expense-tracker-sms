@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { getAllSms, getSmsCount, insertSms } from '@/database/sms.repository';
+import { getAllSms, getSmsCount } from '@/database/sms.repository';
 import { importExistingSms } from '@/sms/sms-importer';
 import { checkSmsPermission, requestSmsPermission } from '@/sms/sms-reader';
 import type { DbStatus, SmsMessage } from '@/types/sms';
@@ -21,17 +21,6 @@ import type { DbStatus, SmsMessage } from '@/types/sms';
 
 function formatDate(unixMs: number): string {
   return new Date(unixMs).toLocaleString();
-}
-
-/** Seed one sample record so Phase 1 verification can be run without SMS. */
-function seedSampleSms(): void {
-  insertSms({
-    android_sms_id: 'sample-001',
-    sender: '+91-9876543210',
-    message: 'Your account was debited INR 500 on 14-Nov. Available balance: INR 10,000.',
-    received_at: Date.now() - 60_000, // 1 minute ago
-    message_type: 'inbox',
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -79,24 +68,6 @@ export default function HomeScreen() {
     setStatusBanner(null);
     setRefreshTick((t) => t + 1);
   }, []);
-
-  const handleSeedSample = useCallback(() => {
-    try {
-      const before = getSmsCount();
-      seedSampleSms();
-      const after = getSmsCount();
-      const inserted = after - before;
-      setStatusBanner(
-        inserted > 0
-          ? '✅ Sample SMS inserted successfully.'
-          : '⚠️ Sample SMS already exists (duplicate ignored).',
-      );
-      refresh();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setStatusBanner(`❌ Error: ${message}`);
-    }
-  }, [refresh]);
 
   const handleImportExistingSms = useCallback(async () => {
     if (Platform.OS !== 'android') {
@@ -197,13 +168,16 @@ export default function HomeScreen() {
       {/* ── Action buttons ── */}
       <View style={styles.actionContainer}>
         <Pressable
-          style={[styles.button, styles.importButton, importing && styles.buttonDisabled]}
+          style={[styles.importButton, importing && styles.buttonDisabled]}
           onPress={handleImportExistingSms}
           disabled={importing}>
           {importing ? (
-            <ActivityIndicator size="small" color="#fff" />
+            <View style={styles.importingRow}>
+              <ActivityIndicator size="small" color="#ffffff" />
+              <Text style={styles.importButtonText}>Importing Messages…</Text>
+            </View>
           ) : (
-            <Text style={styles.buttonText}>📥 Import Existing SMS</Text>
+            <Text style={styles.importButtonText}>📥 Import Existing SMS</Text>
           )}
         </Pressable>
 
@@ -215,9 +189,6 @@ export default function HomeScreen() {
               <Text style={styles.buttonText}>Grant Permission</Text>
             </Pressable>
           )}
-          <Pressable style={styles.button} onPress={handleSeedSample}>
-            <Text style={styles.buttonText}>Insert Sample SMS</Text>
-          </Pressable>
           <Pressable style={[styles.button, styles.secondaryButton]} onPress={refresh}>
             <Text style={styles.buttonText}>Refresh</Text>
           </Pressable>
@@ -241,7 +212,7 @@ export default function HomeScreen() {
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>No messages stored yet.</Text>
           <Text style={styles.emptySubtext}>
-            Tap &quot;Import Existing SMS&quot; to read messages from Android inbox, or &quot;Insert Sample SMS&quot; for a test record.
+            Tap &quot;Import Existing SMS&quot; to read messages from your Android inbox.
           </Text>
         </View>
       ) : (
@@ -341,8 +312,25 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   importButton: {
-    backgroundColor: '#0d652d',
-    paddingVertical: 14,
+    backgroundColor: '#137333',
+    minHeight: 48,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  importButtonText: {
+    color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 15,
+    textAlign: 'center',
+  },
+  importingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
   },
   permButton: {
     backgroundColor: '#e37400',
