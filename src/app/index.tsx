@@ -14,6 +14,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { reloadDatabase } from '@/database/db';
 import { getAllSms, getSmsCount } from '@/database/sms.repository';
+import {
+  getAllTransactions,
+  getTransactionCount,
+} from '@/database/transaction.repository';
+import type { TransactionRecord } from '@/parser/types';
+import { processAllUnprocessed } from '@/parser/transaction.service';
 import { importExistingSms } from '@/sms/sms-importer';
 import {
   addSmsReceivedListener,
@@ -32,6 +38,13 @@ function formatDate(unixMs: number): string {
   return new Date(unixMs).toLocaleString();
 }
 
+function formatCurrency(paise: number): string {
+  return `₹${(paise / 100).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -44,15 +57,48 @@ export default function HomeScreen() {
   });
   const [permissions, setPermissions] = useState<SmsPermissionsStatus | null>(null);
   const [messages, setMessages] = useState<SmsMessage[]>([]);
+  const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
+  const [transactionCount, setTransactionCount] = useState<number>(0);
+  const [activeTab, setActiveTab] = useState<'transactions' | 'sms'>('transactions');
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [detecting, setDetecting] = useState(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
   const appStateRef = useRef<AppStateStatus>((AppState.currentState as AppStateStatus) ?? 'active');
-  const importingRef = useRef(importing);
+  const isMountedRef = useRef(true);
+
   useEffect(() => {
-    importingRef.current = importing;
-  }, [importing]);
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  /**
+   * Runs the offline transaction extraction pipeline on any unprocessed SMS records.
+   */
+  const runTransactionPipeline = useCallback(async () => {
+    try {
+      setDetecting(true);
+      const summary = await processAllUnprocessed();
+      if (isMountedRef.current) {
+        const count = getTransactionCount();
+        const latestTx = getAllTransactions(50);
+        setTransactionCount(count);
+        setTransactions(latestTx);
+        if (summary.totalTransactions > 0) {
+          setStatusBanner(`💳 Extracted ${summary.totalTransactions} new transaction(s).`);
+        }
+      }
+    } catch {
+      // Safe fallback
+    } finally {
+      if (isMountedRef.current) {
+        setDetecting(false);
+      }
+    }
+  }, []);
 
   /**
    * Loads SQLite data, drains pending queue, and checks permissions.
@@ -67,82 +113,66 @@ export default function HomeScreen() {
     try {
       // 1. Drain and synchronize any pending native messages
       const synced = await syncPendingMessages();
-      if (synced > 0) {
+      if (synced > 0 && isMountedRef.current) {
         setStatusBanner(`📥 Synchronized ${synced} incoming message(s).`);
       }
 
       // 2. Re-open SQLite connection so external receiver writes in WAL mode are immediately fresh
       reloadDatabase();
 
-      // 3. Fetch current counts and latest messages from SQLite
-      const count = getSmsCount();
-      const latest = getAllSms(20);
+      // 3. Fetch current counts and latest records from SQLite
+      const smsCount = getSmsCount();
+      const latestSms = getAllSms(20);
+      const txCount = getTransactionCount();
+      const latestTx = getAllTransactions(50);
 
-      setDbStatus({ initialized: true, smsCount: count, error: null });
-      setMessages(latest);
+      if (isMountedRef.current) {
+        setDbStatus({ initialized: true, smsCount, error: null });
+        setMessages(latestSms);
+        setTransactionCount(txCount);
+        setTransactions(latestTx);
+      }
+
+      // 4. Run background transaction extraction for any unprocessed messages
+      runTransactionPipeline();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setDbStatus((prev) => ({ ...prev, error: message }));
+      if (isMountedRef.current) {
+        setDbStatus((prev) => ({ ...prev, error: message }));
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
 
-    // 3. Check runtime permissions
+    // 5. Check runtime permissions
     try {
       const perms = await checkSmsPermissions();
-      setPermissions(perms);
+      if (isMountedRef.current) {
+        setPermissions(perms);
+      }
     } catch {
-      setPermissions({ read: false, receive: false });
+      if (isMountedRef.current) {
+        setPermissions({ read: false, receive: false });
+      }
     }
-  }, []);
+  }, [runTransactionPipeline]);
 
   // Initial load on mount
   useEffect(() => {
     let isMounted = true;
-
-    async function initialLoad() {
-      try {
-        const synced = await syncPendingMessages();
-        if (synced > 0 && isMounted) {
-          setStatusBanner(`📥 Synchronized ${synced} incoming message(s).`);
-        }
-
-        const count = getSmsCount();
-        const latest = getAllSms(20);
-
-        if (isMounted) {
-          setDbStatus({ initialized: true, smsCount: count, error: null });
-          setMessages(latest);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (isMounted) {
-          setDbStatus((prev) => ({ ...prev, error: message }));
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
+    const timer = setTimeout(() => {
+      if (isMounted) {
+        loadData(false);
       }
-
-      try {
-        const perms = await checkSmsPermissions();
-        if (isMounted) {
-          setPermissions(perms);
-        }
-      } catch {
-        if (isMounted) {
-          setPermissions({ read: false, receive: false });
-        }
-      }
-    }
-
-    initialLoad();
+    }, 0);
 
     return () => {
       isMounted = false;
+      clearTimeout(timer);
     };
-  }, []);
+  }, [loadData]);
 
   // AppState change listener: reload when returning from background/inactive to active
   useEffect(() => {
@@ -165,7 +195,9 @@ export default function HomeScreen() {
   // Live native-to-JS SMS event listener
   useEffect(() => {
     const subscription = addSmsReceivedListener((event) => {
-      setStatusBanner(`📥 New SMS received from ${event.sender}`);
+      if (isMountedRef.current) {
+        setStatusBanner(`📥 New SMS received from ${event.sender}`);
+      }
       loadData(true);
     });
 
@@ -200,9 +232,9 @@ export default function HomeScreen() {
 
       setPermissions((prev) => (prev ? { ...prev, read: true } : { read: true, receive: false }));
       setStatusBanner(
-        `✅ Import complete: ${result.totalRead} read, ${result.inserted} newly imported, ${result.duplicates} duplicates skipped.`,
+        `✅ Import complete: ${result.totalRead} read, ${result.inserted} newly imported. Extracting transactions...`,
       );
-      refresh();
+      await loadData(true);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       if (errorMsg.includes('denied')) {
@@ -214,7 +246,7 @@ export default function HomeScreen() {
     } finally {
       setImporting(false);
     }
-  }, [refresh]);
+  }, [loadData]);
 
   const handleRequestPermissions = useCallback(async () => {
     const perms = await requestSmsPermissions();
@@ -236,7 +268,7 @@ export default function HomeScreen() {
     return (
       <SafeAreaView style={styles.centered}>
         <ActivityIndicator size="large" color="#208AEF" />
-        <Text style={styles.loadingText}>Initialising database…</Text>
+        <Text style={styles.loadingText}>Initialising database & transactions…</Text>
       </SafeAreaView>
     );
   }
@@ -259,6 +291,13 @@ export default function HomeScreen() {
         <View style={styles.statusRow}>
           <Text style={styles.statusLabel}>Total SMS stored:</Text>
           <Text style={styles.statusValue}>{dbStatus.smsCount}</Text>
+        </View>
+
+        <View style={styles.statusRow}>
+          <Text style={styles.statusLabel}>Detected Transactions:</Text>
+          <Text style={[styles.statusValue, styles.txHighlight]}>
+            💳 {transactionCount} {detecting ? '(extracting…)' : ''}
+          </Text>
         </View>
 
         <View style={styles.statusRow}>
@@ -333,13 +372,95 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* ── Message list ── */}
-      <View style={styles.listHeaderRow}>
-        <Text style={styles.listHeader}>Latest Messages</Text>
-        <Text style={styles.listSubtitle}>Showing latest {Math.min(messages.length, 20)}</Text>
+      {/* ── Tabs: Transactions vs SMS ── */}
+      <View style={styles.tabContainer}>
+        <Pressable
+          style={[styles.tab, activeTab === 'transactions' && styles.activeTab]}
+          onPress={() => setActiveTab('transactions')}>
+          <Text style={[styles.tabText, activeTab === 'transactions' && styles.activeTabText]}>
+            💳 Transactions ({transactionCount})
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[styles.tab, activeTab === 'sms' && styles.activeTab]}
+          onPress={() => setActiveTab('sms')}>
+          <Text style={[styles.tabText, activeTab === 'sms' && styles.activeTabText]}>
+            💬 All SMS ({dbStatus.smsCount})
+          </Text>
+        </Pressable>
       </View>
 
-      {messages.length === 0 ? (
+      {/* ── Active Tab Content ── */}
+      {activeTab === 'transactions' ? (
+        transactions.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyText}>No transactions detected yet.</Text>
+            <Text style={styles.emptySubtext}>
+              Banking transaction SMS will automatically be parsed and displayed here.
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={transactions}
+            keyExtractor={(item) => String(item.id)}
+            contentContainerStyle={styles.list}
+            renderItem={({ item }) => (
+              <View style={styles.txCard}>
+                <View style={styles.txHeaderRow}>
+                  <View style={styles.txBadgeRow}>
+                    <View
+                      style={[
+                        styles.badge,
+                        item.transactionType === 'debit'
+                          ? styles.badgeDebit
+                          : item.transactionType === 'credit'
+                            ? styles.badgeCredit
+                            : styles.badgeRefund,
+                      ]}>
+                      <Text style={styles.badgeText}>{item.transactionType.toUpperCase()}</Text>
+                    </View>
+                    <Text style={styles.bankName} numberOfLines={1}>
+                      {item.bankName || 'Bank'}
+                    </Text>
+                  </View>
+                  <Text
+                    style={[
+                      styles.amountText,
+                      item.transactionType === 'debit'
+                        ? styles.amountDebit
+                        : item.transactionType === 'credit'
+                          ? styles.amountCredit
+                          : styles.amountRefund,
+                    ]}>
+                    {item.transactionType === 'debit' ? '-' : '+'}
+                    {formatCurrency(item.amountPaise)}
+                  </Text>
+                </View>
+
+                {item.merchant && (
+                  <Text style={styles.merchantText} numberOfLines={1}>
+                    🏪 {item.merchant}
+                  </Text>
+                )}
+
+                <View style={styles.txDetailRow}>
+                  {item.accountIdentifier && (
+                    <Text style={styles.detailItem}>A/c: {item.accountIdentifier}</Text>
+                  )}
+                  {item.referenceNumber && (
+                    <Text style={styles.detailItem}>Ref: {item.referenceNumber}</Text>
+                  )}
+                  {item.balancePaise !== null && (
+                    <Text style={styles.detailItem}>Bal: {formatCurrency(item.balancePaise)}</Text>
+                  )}
+                </View>
+
+                <Text style={styles.txDate}>{formatDate(item.transactionDate)}</Text>
+              </View>
+            )}
+          />
+        )
+      ) : messages.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>No messages stored yet.</Text>
           <Text style={styles.emptySubtext}>
@@ -428,6 +549,10 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#111',
   },
+  txHighlight: {
+    color: '#1a73e8',
+    fontWeight: '700',
+  },
   ok: { color: '#22a85a' },
   error: { color: '#d93025' },
   pending: { color: '#e37400' },
@@ -448,87 +573,98 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingHorizontal: 20,
     paddingVertical: 12,
-    borderRadius: 10,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  importButtonText: {
-    color: '#ffffff',
-    fontWeight: '700',
-    fontSize: 15,
-    textAlign: 'center',
   },
   importingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
+    gap: 10,
   },
-  permButton: {
-    backgroundColor: '#e37400',
+  importButtonText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
   },
   buttonRow: {
     flexDirection: 'row',
-    gap: 8,
+    gap: 10,
   },
   button: {
     flex: 1,
-    backgroundColor: '#208AEF',
-    paddingVertical: 11,
-    borderRadius: 10,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  secondaryButton: {
-    backgroundColor: '#6c757d',
   },
   buttonDisabled: {
     opacity: 0.6,
   },
+  permButton: {
+    backgroundColor: '#1a73e8',
+  },
+  secondaryButton: {
+    backgroundColor: '#e0e0e0',
+  },
   buttonText: {
-    color: '#fff',
+    color: '#111',
+    fontSize: 14,
     fontWeight: '600',
-    fontSize: 13,
   },
 
-  // Banner
+  // Feedback banner
   bannerContainer: {
     marginHorizontal: 16,
-    marginBottom: 10,
-    padding: 12,
+    marginBottom: 8,
+    padding: 10,
     backgroundColor: '#e8f0fe',
     borderRadius: 8,
     borderLeftWidth: 4,
-    borderLeftColor: '#208AEF',
+    borderLeftColor: '#1a73e8',
   },
   bannerText: {
     fontSize: 13,
     color: '#1a73e8',
-    lineHeight: 18,
   },
 
-  // List
-  listHeaderRow: {
+  // Tabs
+  tabContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     marginHorizontal: 16,
     marginBottom: 8,
+    backgroundColor: '#e8eaed',
+    borderRadius: 8,
+    padding: 3,
   },
-  listHeader: {
-    fontSize: 16,
+  tab: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: 'center',
+    borderRadius: 6,
+  },
+  activeTab: {
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  tabText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#5f6368',
+  },
+  activeTabText: {
+    color: '#1a73e8',
     fontWeight: '700',
-    color: '#111',
   },
-  listSubtitle: {
-    fontSize: 12,
-    color: '#888',
-  },
-  list: {
-    paddingHorizontal: 16,
-    paddingBottom: 24,
-    gap: 10,
-  },
+
+  // Empty state
   emptyState: {
     flex: 1,
     alignItems: 'center',
@@ -538,8 +674,8 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 16,
-    color: '#555',
     fontWeight: '600',
+    color: '#555',
   },
   emptySubtext: {
     fontSize: 13,
@@ -547,10 +683,15 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Message card
+  // List & Cards
+  list: {
+    paddingHorizontal: 16,
+    paddingBottom: 24,
+    gap: 10,
+  },
   messageCard: {
     backgroundColor: '#fff',
-    borderRadius: 12,
+    borderRadius: 10,
     padding: 14,
     gap: 6,
     shadowColor: '#000',
@@ -567,7 +708,7 @@ const styles = StyleSheet.create({
   sender: {
     fontSize: 14,
     fontWeight: '700',
-    color: '#208AEF',
+    color: '#202124',
     flex: 1,
     marginRight: 8,
   },
@@ -577,11 +718,87 @@ const styles = StyleSheet.create({
   },
   messageBody: {
     fontSize: 13,
-    color: '#333',
+    color: '#3c4043',
     lineHeight: 18,
   },
   metaText: {
     fontSize: 11,
-    color: '#aaa',
+    color: '#9aa0a6',
+    marginTop: 2,
+  },
+
+  // Transaction Cards
+  txCard: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 14,
+    gap: 6,
+    borderLeftWidth: 4,
+    borderLeftColor: '#1a73e8',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  txHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  txBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  badge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  badgeDebit: { backgroundColor: '#fce8e6' },
+  badgeCredit: { backgroundColor: '#e6f4ea' },
+  badgeRefund: { backgroundColor: '#e8f0fe' },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#202124',
+  },
+  bankName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#202124',
+    flex: 1,
+  },
+  amountText: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  amountDebit: { color: '#d93025' },
+  amountCredit: { color: '#137333' },
+  amountRefund: { color: '#1a73e8' },
+  merchantText: {
+    fontSize: 13,
+    color: '#202124',
+    fontWeight: '500',
+  },
+  txDetailRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  detailItem: {
+    fontSize: 11,
+    color: '#5f6368',
+    backgroundColor: '#f1f3f4',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  txDate: {
+    fontSize: 11,
+    color: '#888',
+    marginTop: 2,
   },
 });

@@ -34,6 +34,7 @@ export async function initDatabase(): Promise<void> {
 
   // Enable WAL mode for better concurrent multi-process access (React Native + SmsReceiver).
   db.execSync('PRAGMA journal_mode = WAL;');
+  db.execSync('PRAGMA foreign_keys = ON;');
 
   // Step 1: Ensure base table exists
   db.execSync(SCHEMA_STATEMENTS[0]); // CREATE_SMS_TABLE
