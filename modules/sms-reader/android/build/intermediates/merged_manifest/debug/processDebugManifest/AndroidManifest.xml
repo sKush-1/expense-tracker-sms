@@ -4,10 +4,32 @@
 
     <uses-sdk android:minSdkVersion="24" />
     <!--
-    READ_SMS is a dangerous (runtime) permission.
-    It must also be declared here so Android knows the module uses it.
-    The host app requests it at runtime via PermissionsAndroid.
+    Permissions required:
+    - READ_SMS: For historical inbox import
+    - RECEIVE_SMS: For automatic incoming SMS capture via SmsReceiver
     -->
     <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+
+    <application>
+
+        <!--
+      SmsReceiver captures incoming SMS messages even when the app is
+      in the background or the process has been killed.
+
+      - android:exported="true" is required for Android 12+ (API 31+)
+      - android:permission="android.permission.BROADCAST_SMS" ensures only
+        the Android OS Telephony subsystem can deliver intents to this receiver
+      - priority="999" ensures timely processing of incoming SMS
+        -->
+        <receiver
+            android:name="expo.modules.smsreader.SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS" >
+            <intent-filter android:priority="999" >
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+    </application>
 
 </manifest>

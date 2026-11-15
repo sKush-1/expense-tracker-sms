@@ -6,12 +6,45 @@
 5-->INJECTED
 5-->INJECTED
 6    <!--
-7    READ_SMS is a dangerous (runtime) permission.
-8    It must also be declared here so Android knows the module uses it.
-9    The host app requests it at runtime via PermissionsAndroid.
+7    Permissions required:
+8    - READ_SMS: For historical inbox import
+9    - RECEIVE_SMS: For automatic incoming SMS capture via SmsReceiver
 10    -->
 11    <uses-permission android:name="android.permission.READ_SMS" />
 11-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:7:3-65
 11-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:7:20-62
-12
-13</manifest>
+12    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+12-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:8:3-68
+12-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:8:20-65
+13
+14    <application>
+14-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:10:3-28:17
+15
+16        <!--
+17      SmsReceiver captures incoming SMS messages even when the app is
+18      in the background or the process has been killed.
+19
+20      - android:exported="true" is required for Android 12+ (API 31+)
+21      - android:permission="android.permission.BROADCAST_SMS" ensures only
+22        the Android OS Telephony subsystem can deliver intents to this receiver
+23      - priority="999" ensures timely processing of incoming SMS
+24        -->
+25        <receiver
+25-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:20:5-27:16
+26            android:name="expo.modules.smsreader.SmsReceiver"
+26-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:21:7-34
+27            android:exported="true"
+27-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:22:7-30
+28            android:permission="android.permission.BROADCAST_SMS" >
+28-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:23:7-60
+29            <intent-filter android:priority="999" >
+29-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:24:7-26:23
+29-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:24:22-44
+30                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+30-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:25:9-74
+30-->/home/sumit/Desktop/mobile-apps/expense-tracker-sms/modules/sms-reader/android/src/main/AndroidManifest.xml:25:17-71
+31            </intent-filter>
+32        </receiver>
+33    </application>
+34
+35</manifest>
