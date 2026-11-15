@@ -6,6 +6,12 @@
       "@/*": [
         "./src/*"
       ],
+      "@modules/*": [
+        "./modules/*"
+      ],
+      "sms-reader": [
+        "./modules/sms-reader"
+      ],
       "@/assets/*": [
         "./assets/*"
       ]

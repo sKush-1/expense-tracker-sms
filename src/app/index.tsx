@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -10,6 +11,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { getAllSms, getSmsCount, insertSms } from '@/database/sms.repository';
+import { importExistingSms } from '@/sms/sms-importer';
+import { checkSmsPermission, requestSmsPermission } from '@/sms/sms-reader';
 import type { DbStatus, SmsMessage } from '@/types/sms';
 
 // ---------------------------------------------------------------------------
@@ -41,17 +44,16 @@ export default function HomeScreen() {
     smsCount: 0,
     error: null,
   });
+  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
   const [messages, setMessages] = useState<SmsMessage[]>([]);
   const [loading, setLoading] = useState(true);
-  const [seedMessage, setSeedMessage] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
   // Ref-based refresh counter: incrementing it triggers the data-load effect.
   const [refreshTick, setRefreshTick] = useState(0);
 
   // Load data whenever refreshTick changes (mount + explicit refresh).
-  // setState is called synchronously because we're reading from a local
-  // SQLite database — a fully synchronous native call. This is an intentional
-  // pattern for initialising UI state from an offline local store.
   useEffect(() => {
     try {
       const count = getSmsCount();
@@ -65,15 +67,18 @@ export default function HomeScreen() {
     } finally {
       setLoading(false);
     }
+
+    // Check permission status
+    checkSmsPermission()
+      .then((granted) => setPermissionGranted(granted))
+      .catch(() => setPermissionGranted(false));
   }, [refreshTick]);
 
   const refresh = useCallback(() => {
     setLoading(true);
-    setSeedMessage(null);
+    setStatusBanner(null);
     setRefreshTick((t) => t + 1);
   }, []);
-
-  const loadData = refresh;
 
   const handleSeedSample = useCallback(() => {
     try {
@@ -81,21 +86,64 @@ export default function HomeScreen() {
       seedSampleSms();
       const after = getSmsCount();
       const inserted = after - before;
-      setSeedMessage(
+      setStatusBanner(
         inserted > 0
           ? '✅ Sample SMS inserted successfully.'
           : '⚠️ Sample SMS already exists (duplicate ignored).',
       );
-      loadData();
+      refresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setSeedMessage(`❌ Error: ${message}`);
+      setStatusBanner(`❌ Error: ${message}`);
     }
-  }, [loadData]);
-
-  const handleRefresh = useCallback(() => {
-    refresh();
   }, [refresh]);
+
+  const handleImportExistingSms = useCallback(async () => {
+    if (Platform.OS !== 'android') {
+      setStatusBanner('⚠️ SMS reading is only supported on Android devices.');
+      return;
+    }
+
+    setImporting(true);
+    setStatusBanner('⏳ Requesting SMS permission and reading inbox...');
+
+    try {
+      const result = await importExistingSms({
+        batchSize: 100,
+        onProgress: (p) => {
+          setStatusBanner(
+            `⏳ Reading SMS... ${p.read} read (${p.inserted} new, ${p.duplicates} skipped)`,
+          );
+        },
+      });
+
+      setPermissionGranted(true);
+      setStatusBanner(
+        `✅ Import complete: ${result.totalRead} read, ${result.inserted} newly imported, ${result.duplicates} duplicates skipped.`,
+      );
+      refresh();
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      if (errorMsg.includes('denied')) {
+        setPermissionGranted(false);
+        setStatusBanner('❌ READ_SMS permission was denied. Please grant permission in settings.');
+      } else {
+        setStatusBanner(`❌ Import failed: ${errorMsg}`);
+      }
+    } finally {
+      setImporting(false);
+    }
+  }, [refresh]);
+
+  const handleRequestPermission = useCallback(async () => {
+    const granted = await requestSmsPermission();
+    setPermissionGranted(granted);
+    setStatusBanner(
+      granted
+        ? '✅ READ_SMS permission granted.'
+        : '❌ READ_SMS permission denied.',
+    );
+  }, []);
 
   // ---- Render ----
 
@@ -112,10 +160,10 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.container}>
       {/* ── Status card ── */}
       <View style={styles.statusCard}>
-        <Text style={styles.statusTitle}>Database Status</Text>
+        <Text style={styles.statusTitle}>Application Status</Text>
 
         <View style={styles.statusRow}>
-          <Text style={styles.statusLabel}>Initialized:</Text>
+          <Text style={styles.statusLabel}>Database Initialized:</Text>
           <Text style={[styles.statusValue, dbStatus.initialized ? styles.ok : styles.error]}>
             {dbStatus.initialized ? '✅ Yes' : '❌ No'}
           </Text>
@@ -126,34 +174,74 @@ export default function HomeScreen() {
           <Text style={styles.statusValue}>{dbStatus.smsCount}</Text>
         </View>
 
+        <View style={styles.statusRow}>
+          <Text style={styles.statusLabel}>READ_SMS Permission:</Text>
+          <Text
+            style={[
+              styles.statusValue,
+              permissionGranted ? styles.ok : permissionGranted === false ? styles.error : styles.pending,
+            ]}>
+            {permissionGranted === null
+              ? 'Checking…'
+              : permissionGranted
+                ? '✅ Granted'
+                : '⚠️ Not Granted'}
+          </Text>
+        </View>
+
         {dbStatus.error !== null && (
           <Text style={styles.errorText}>Error: {dbStatus.error}</Text>
         )}
       </View>
 
       {/* ── Action buttons ── */}
-      <View style={styles.buttonRow}>
-        <Pressable style={styles.button} onPress={handleSeedSample}>
-          <Text style={styles.buttonText}>Insert Sample SMS</Text>
+      <View style={styles.actionContainer}>
+        <Pressable
+          style={[styles.button, styles.importButton, importing && styles.buttonDisabled]}
+          onPress={handleImportExistingSms}
+          disabled={importing}>
+          {importing ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>📥 Import Existing SMS</Text>
+          )}
         </Pressable>
-        <Pressable style={[styles.button, styles.secondaryButton]} onPress={handleRefresh}>
-          <Text style={styles.buttonText}>Refresh</Text>
-        </Pressable>
+
+        <View style={styles.buttonRow}>
+          {permissionGranted === false && (
+            <Pressable
+              style={[styles.button, styles.permButton]}
+              onPress={handleRequestPermission}>
+              <Text style={styles.buttonText}>Grant Permission</Text>
+            </Pressable>
+          )}
+          <Pressable style={styles.button} onPress={handleSeedSample}>
+            <Text style={styles.buttonText}>Insert Sample SMS</Text>
+          </Pressable>
+          <Pressable style={[styles.button, styles.secondaryButton]} onPress={refresh}>
+            <Text style={styles.buttonText}>Refresh</Text>
+          </Pressable>
+        </View>
       </View>
 
-      {/* ── Seed feedback ── */}
-      {seedMessage !== null && (
-        <Text style={styles.seedMessage}>{seedMessage}</Text>
+      {/* ── Feedback Banner ── */}
+      {statusBanner !== null && (
+        <View style={styles.bannerContainer}>
+          <Text style={styles.bannerText}>{statusBanner}</Text>
+        </View>
       )}
 
       {/* ── Message list ── */}
-      <Text style={styles.listHeader}>Latest Messages</Text>
+      <View style={styles.listHeaderRow}>
+        <Text style={styles.listHeader}>Latest Messages</Text>
+        <Text style={styles.listSubtitle}>Showing latest {Math.min(messages.length, 20)}</Text>
+      </View>
 
       {messages.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>No messages stored yet.</Text>
           <Text style={styles.emptySubtext}>
-            Tap &quot;Insert Sample SMS&quot; to seed a test record.
+            Tap &quot;Import Existing SMS&quot; to read messages from Android inbox, or &quot;Insert Sample SMS&quot; for a test record.
           </Text>
         </View>
       ) : (
@@ -239,50 +327,82 @@ const styles = StyleSheet.create({
   },
   ok: { color: '#22a85a' },
   error: { color: '#d93025' },
+  pending: { color: '#e37400' },
   errorText: {
     fontSize: 13,
     color: '#d93025',
     marginTop: 4,
   },
 
-  // Buttons
+  // Action buttons
+  actionContainer: {
+    paddingHorizontal: 16,
+    gap: 10,
+    marginBottom: 8,
+  },
+  importButton: {
+    backgroundColor: '#0d652d',
+    paddingVertical: 14,
+  },
+  permButton: {
+    backgroundColor: '#e37400',
+  },
   buttonRow: {
     flexDirection: 'row',
-    paddingHorizontal: 16,
-    gap: 12,
-    marginBottom: 8,
+    gap: 8,
   },
   button: {
     flex: 1,
     backgroundColor: '#208AEF',
-    paddingVertical: 12,
+    paddingVertical: 11,
     borderRadius: 10,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   secondaryButton: {
     backgroundColor: '#6c757d',
   },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
   buttonText: {
     color: '#fff',
     fontWeight: '600',
-    fontSize: 14,
+    fontSize: 13,
   },
 
-  // Seed feedback
-  seedMessage: {
+  // Banner
+  bannerContainer: {
     marginHorizontal: 16,
-    marginBottom: 8,
+    marginBottom: 10,
+    padding: 12,
+    backgroundColor: '#e8f0fe',
+    borderRadius: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: '#208AEF',
+  },
+  bannerText: {
     fontSize: 13,
-    color: '#333',
+    color: '#1a73e8',
+    lineHeight: 18,
   },
 
   // List
-  listHeader: {
+  listHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     marginHorizontal: 16,
     marginBottom: 8,
+  },
+  listHeader: {
     fontSize: 16,
     fontWeight: '700',
     color: '#111',
+  },
+  listSubtitle: {
+    fontSize: 12,
+    color: '#888',
   },
   list: {
     paddingHorizontal: 16,

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="expo.modules.smsreader" >
+
+    <uses-sdk android:minSdkVersion="24" />
+    <!--
+    READ_SMS is a dangerous (runtime) permission.
+    It must also be declared here so Android knows the module uses it.
+    The host app requests it at runtime via PermissionsAndroid.
+    -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+
+</manifest>
