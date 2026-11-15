@@ -37,7 +37,8 @@ class SmsReceiver : BroadcastReceiver() {
       // Multipart messages share the same originating address and timestamp.
       val grouped = messages.groupBy { sms ->
         val sender = sms.displayOriginatingAddress ?: sms.originatingAddress ?: "Unknown"
-        val timestamp = sms.timestampMillis
+        val rawTimestamp = sms.timestampMillis
+        val timestamp = if (rawTimestamp > 0L) rawTimestamp else System.currentTimeMillis()
         Pair(sender, timestamp)
       }
 

@@ -46,8 +46,20 @@ export declare class SmsReaderNativeModule extends NativeModule {
   getTotalInboxCount(): Promise<number>;
 
   /**
-   * Drains messages from the durable native pending queue.
-   * These are messages captured by SmsReceiver when direct SQLite write was locked.
+   * Reads pending messages WITHOUT deleting them (step 1 of crash-safe read/ack).
+   */
+  getPendingMessages(): Promise<PendingSmsRecord[]>;
+
+  /**
+   * Atomically removes acknowledged fingerprints from the queue (step 2 of crash-safe read/ack).
+   *
+   * @param fingerprints Fingerprints of messages successfully persisted to SQLite.
+   * @returns Count of removed messages.
+   */
+  acknowledgePendingMessages(fingerprints: string[]): Promise<number>;
+
+  /**
+   * Backward-compatible drain method (reads and acknowledges all).
    */
   drainPendingMessages(): Promise<PendingSmsRecord[]>;
 

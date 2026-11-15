@@ -1,7 +1,6 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 
-import { insertSmsBatch } from '@/database/sms.repository';
-import type { InsertSmsPayload } from '@/types/sms';
+import { insertSms } from '@/database/sms.repository';
 
 import { SmsReaderModule } from '../../modules/sms-reader';
 import type { NativeSmsRecord } from '../../modules/sms-reader';
@@ -112,33 +111,69 @@ export function computeSmsFingerprint(
 /**
  * Synchronizes any pending SMS messages queued by SmsReceiver.
  *
- * If the React Native process was killed or SQLite was locked when an SMS arrived,
- * SmsReceiver persisted the message in a durable local queue.
- * This method drains that queue into the SQLite database.
+ * Implements a crash-safe read/acknowledge pattern:
+ * 1. Reads pending messages without deleting them from disk.
+ * 2. Attempts to persist each message into SQLite.
+ * 3. Acknowledges only messages that were successfully inserted or already
+ *    confirmed as existing duplicates in SQLite.
+ * 4. Failed messages remain in the queue for future retry.
  *
  * @returns Number of newly inserted messages from the pending queue.
  */
 export async function syncPendingMessages(): Promise<number> {
-  if (Platform.OS !== 'android' || !SmsReaderModule?.drainPendingMessages) {
+  if (Platform.OS !== 'android') {
     return 0;
   }
 
   try {
-    const pending = await SmsReaderModule.drainPendingMessages();
+    // 1. Read pending messages without deleting them from disk
+    const pending = SmsReaderModule?.getPendingMessages
+      ? await SmsReaderModule.getPendingMessages()
+      : SmsReaderModule?.drainPendingMessages
+        ? await SmsReaderModule.drainPendingMessages()
+        : [];
+
     if (!pending || pending.length === 0) {
       return 0;
     }
 
-    const payloads: InsertSmsPayload[] = pending.map((msg) => ({
-      android_sms_id: `recv_${msg.fingerprint}`,
-      sender: msg.sender,
-      message: msg.message,
-      received_at: msg.received_at,
-      message_type: 'inbox',
-      fingerprint: msg.fingerprint,
-    }));
+    const acknowledgedFingerprints: string[] = [];
+    let newlyInsertedCount = 0;
 
-    return insertSmsBatch(payloads);
+    // 2. Persist each message into SQLite with isolation
+    for (const msg of pending) {
+      try {
+        const result = insertSms({
+          android_sms_id: `recv_${msg.fingerprint}`,
+          sender: msg.sender,
+          message: msg.message,
+          received_at: msg.received_at,
+          message_type: 'inbox',
+          fingerprint: msg.fingerprint,
+        });
+
+        // result.changes === 1 -> newly inserted
+        // result.changes === 0 -> already existed in SQLite (duplicate)
+        // In both cases, the message is durable in SQLite
+        acknowledgedFingerprints.push(msg.fingerprint);
+        if (result.changes > 0) {
+          newlyInsertedCount++;
+        }
+      } catch (insertErr) {
+        // Do NOT acknowledge this message so it remains in the queue for retry
+        console.error(
+          `[sms-reader] Failed to persist pending message (fingerprint: ${msg.fingerprint.slice(0, 8)}...):`,
+          insertErr,
+        );
+      }
+    }
+
+    // 3. Atomically acknowledge ONLY the successfully persisted/duplicate messages
+    if (acknowledgedFingerprints.length > 0 && SmsReaderModule?.acknowledgePendingMessages) {
+      await SmsReaderModule.acknowledgePendingMessages(acknowledgedFingerprints);
+    }
+
+    return newlyInsertedCount;
   } catch (err) {
     console.error('[sms-reader] Failed to sync pending messages:', err);
     return 0;

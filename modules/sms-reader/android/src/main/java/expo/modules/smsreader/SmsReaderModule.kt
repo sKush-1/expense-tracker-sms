@@ -13,7 +13,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
  * Expo native module that provides:
  *   - Reading historical SMS messages from Android Content Provider
  *   - Checking READ_SMS and RECEIVE_SMS permissions
- *   - Draining durable pending queue messages captured by SmsReceiver
+ *   - Crash-safe read/acknowledge pending queue for SmsReceiver
  *   - Computing deterministic SHA-256 SMS fingerprints
  */
 class SmsReaderModule : Module() {
@@ -59,9 +59,38 @@ class SmsReaderModule : Module() {
     }
 
     // -----------------------------------------------------------------------
+    // getPendingMessages()
+    // Reads pending messages WITHOUT deleting them (crash-safe step 1).
+    // -----------------------------------------------------------------------
+    AsyncFunction("getPendingMessages") {
+      val context = appContext.reactContext
+        ?: throw Exceptions.AppContextLost()
+
+      val pending = SmsPendingQueue.getPendingMessages(context)
+      pending.map { msg ->
+        mapOf(
+          "sender" to msg.sender,
+          "message" to msg.message,
+          "received_at" to msg.receivedAt,
+          "fingerprint" to msg.fingerprint
+        )
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // acknowledgePendingMessages(fingerprints)
+    // Atomically removes acknowledged fingerprints from the queue (crash-safe step 2).
+    // -----------------------------------------------------------------------
+    AsyncFunction("acknowledgePendingMessages") { fingerprints: List<String> ->
+      val context = appContext.reactContext
+        ?: throw Exceptions.AppContextLost()
+
+      SmsPendingQueue.acknowledge(context, fingerprints)
+    }
+
+    // -----------------------------------------------------------------------
     // drainPendingMessages()
-    // Returns any messages that were queued by the SmsReceiver (when SQLite
-    // was temporarily locked) and removes them from the pending queue.
+    // Backward-compatible drain function (reads and removes all pending).
     // -----------------------------------------------------------------------
     AsyncFunction("drainPendingMessages") {
       val context = appContext.reactContext
@@ -92,6 +121,7 @@ class SmsReaderModule : Module() {
     // -----------------------------------------------------------------------
     // readInboxPage(offset, pageSize)
     // Reads a single page of inbox messages from the SMS Content Provider.
+    // Queries DATE_SENT to match SmsMessage.timestampMillis from BroadcastReceiver.
     // -----------------------------------------------------------------------
     AsyncFunction("readInboxPage") { offset: Int, pageSize: Int ->
       val context = appContext.reactContext
@@ -113,6 +143,7 @@ class SmsReaderModule : Module() {
         Telephony.Sms.ADDRESS,
         Telephony.Sms.BODY,
         Telephony.Sms.DATE,
+        Telephony.Sms.DATE_SENT,
         Telephony.Sms.TYPE,
       )
 
@@ -127,24 +158,30 @@ class SmsReaderModule : Module() {
           null,  // selectionArgs
           sortOrder,
         )?.use { cursor ->
-          val idIdx      = cursor.getColumnIndex(Telephony.Sms._ID)
-          val addressIdx = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
-          val bodyIdx    = cursor.getColumnIndex(Telephony.Sms.BODY)
-          val dateIdx    = cursor.getColumnIndex(Telephony.Sms.DATE)
-          val typeIdx    = cursor.getColumnIndex(Telephony.Sms.TYPE)
+          val idIdx       = cursor.getColumnIndex(Telephony.Sms._ID)
+          val addressIdx  = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
+          val bodyIdx     = cursor.getColumnIndex(Telephony.Sms.BODY)
+          val dateIdx     = cursor.getColumnIndex(Telephony.Sms.DATE)
+          val dateSentIdx = cursor.getColumnIndex(Telephony.Sms.DATE_SENT)
+          val typeIdx     = cursor.getColumnIndex(Telephony.Sms.TYPE)
 
           while (cursor.moveToNext()) {
             val address = if (addressIdx >= 0) cursor.getString(addressIdx) ?: "" else ""
             val body = if (bodyIdx >= 0) cursor.getString(bodyIdx) ?: "" else ""
             val date = if (dateIdx >= 0) cursor.getLong(dateIdx) else 0L
-            val fingerprint = SmsFingerprint.compute(address, body, date)
+            val dateSent = if (dateSentIdx >= 0) cursor.getLong(dateSentIdx) else 0L
+
+            // Consistent timestamp: Inbound SMS Service Center timestamp matches SmsMessage.timestampMillis.
+            // If dateSent > 0, use dateSent; otherwise fall back to date.
+            val effectiveTimestamp = if (dateSent > 0L) dateSent else date
+            val fingerprint = SmsFingerprint.compute(address, body, effectiveTimestamp)
 
             results.add(
               mapOf(
                 "id"          to if (idIdx >= 0) cursor.getString(idIdx) else null,
                 "address"     to address,
                 "body"        to body,
-                "date"        to date,
+                "date"        to effectiveTimestamp,
                 "type"        to if (typeIdx >= 0) cursor.getInt(typeIdx) else 1,
                 "fingerprint" to fingerprint,
               ),
